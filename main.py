@@ -508,13 +508,13 @@ def translate_and_summarize(items: list[dict]) -> list[dict]:
 # ══════════════════════════════════════════
 # Step 3. Gemini 분석 — AI 개발도구 관점
 # ══════════════════════════════════════════
-def gemini_analyze(items: list[dict]) -> str:
+def gemini_analyze(items: list[dict]) -> tuple:
     """
-    통과된 뉴스 전체를 바탕으로
-    AI 개발도구 / vibe coding / IDE / agent / MCP 관점 인사이트 생성
+    통과된 뉴스 전체를 바탕으로 AI 개발도구 관점 인사이트 생성.
+    반환: (분석 본문, 한 줄 트렌딩 요약)
     """
     if not GEMINI_API_KEY:
-        return ""
+        return "", ""
 
     print("\n🧠 Gemini 분석 중...")
 
@@ -541,16 +541,34 @@ def gemini_analyze(items: list[dict]) -> str:
 💡 개발자가 챙겨볼 것
 (실제 개발 워크플로우에 영향을 줄 수 있는 내용 1~2가지)
 
+🗞️ 오늘의 트렌딩 한 줄 요약
+(위 전체를 압축한 딱 한 문장. "🗞️ 오늘의 트렌딩 한 줄 요약" 헤더 바로 아래에 작성)
+
 뉴스 목록:
 {titles}"""
 
     try:
-        analysis = call_gemini(prompt)
-        print(f"  ✅ 분석 완료 ({len(analysis)}자)")
-        return analysis
+        raw = call_gemini(prompt)
+        print(f"  ✅ 분석 완료 ({len(raw)}자)")
+
+        # 한 줄 요약 파싱
+        one_liner = ""
+        if "🗞️" in raw:
+            after = raw.split("🗞️")[-1].strip()
+            for line in after.splitlines():
+                line = line.strip()
+                if line and "한 줄 요약" not in line:
+                    one_liner = line
+                    break
+            body = raw.split("🗞️")[0].strip()
+        else:
+            body = raw
+
+        return body, one_liner
+
     except Exception as e:
         print(f"  ⚠️ 분석 오류: {e}")
-        return ""
+        return "", ""
 
 
 # ══════════════════════════════════════════
@@ -574,7 +592,7 @@ def emoji_for(source: str) -> str:
     return "⚪"
 
 
-def send_to_slack(items: list[dict], analysis: str, period: str):
+def send_to_slack(items: list[dict], analysis: str, one_liner: str, period: str):
     if not items:
         print("📭 전송할 항목 없음")
         return
@@ -646,6 +664,14 @@ def send_to_slack(items: list[dict], analysis: str, period: str):
             })
             blocks.append({"type": "divider"})
 
+    # ── 오늘의 트렌딩 한 줄 요약
+    if one_liner:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"🗞️ *오늘의 트렌딩 한 줄 요약*\n{one_liner}"},
+        })
+        blocks.append({"type": "divider"})
+
     # ── 푸터
     blocks.append({
         "type": "context",
@@ -699,11 +725,11 @@ def main():
     # 3. Gemini 번역 + 요약
     items = translate_and_summarize(items)
 
-    # 4. Gemini 분석 — AI 개발도구 관점 인사이트
-    analysis = gemini_analyze(items)
+    # 4. Gemini 분석 — AI 개발도구 관점 인사이트 + 한 줄 요약
+    analysis, one_liner = gemini_analyze(items)
 
-    # 5. Slack 발송 (분석 먼저, 뉴스 링크 뒤에)
-    send_to_slack(items, analysis, period)
+    # 5. Slack 발송 (분석 먼저, 뉴스 링크, 한 줄 요약 마지막)
+    send_to_slack(items, analysis, one_liner, period)
 
 
 if __name__ == "__main__":
