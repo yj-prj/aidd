@@ -32,15 +32,14 @@ jobs:
           python-version: "3.11"
 
       - name: 📦 패키지 설치
-        run: pip install anthropic requests
+        # anthropic 불필요 — requests만으로 Gemini 호출
+        run: pip install requests
 
       - name: 🤖 봇 실행
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           PRODUCT_HUNT_TOKEN: ${{ secrets.PRODUCT_HUNT_TOKEN }}
-          # cron 시각 기준으로 오전/오후 자동 판별
-          # UTC 00:00 → 오전(morning), UTC 09:00 → 오후(evening)
           RUN_PERIOD: >-
             ${{
               github.event_name == 'workflow_dispatch'
