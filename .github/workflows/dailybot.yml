@@ -1,0 +1,50 @@
+name: AI Dev Tool Trend Bot
+
+on:
+  schedule:
+    # 오전 9시 KST = UTC 00:00
+    - cron: "0 0 * * *"
+    # 오후 4시 KST = UTC 09:00
+    - cron: "0 7 * * *"
+  # 수동 테스트용
+  workflow_dispatch:
+    inputs:
+      period:
+        description: "실행 시간대"
+        required: false
+        default: "morning"
+        type: choice
+        options:
+          - morning
+          - evening
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 📦 패키지 설치
+        run: pip install anthropic requests
+
+      - name: 🤖 봇 실행
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PRODUCT_HUNT_TOKEN: ${{ secrets.PRODUCT_HUNT_TOKEN }}
+          # cron 시각 기준으로 오전/오후 자동 판별
+          # UTC 00:00 → 오전(morning), UTC 09:00 → 오후(evening)
+          RUN_PERIOD: >-
+            ${{
+              github.event_name == 'workflow_dispatch'
+              && inputs.period
+              || (github.event.schedule == '0 0 * * *' && 'morning' || 'evening')
+            }}
+        run: python main.py
