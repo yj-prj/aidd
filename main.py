@@ -36,7 +36,7 @@ KST        = timezone(timedelta(hours=9))
 HEADERS    = {"User-Agent": "AI-Trend-SlackBot/4.0"}
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models"
-    "/gemini-1.5-flash-8b:generateContent"  # RPM 1,000 / 일 무제한 (무료 티어)
+    "/gemini-2.0-flash-lite:generateContent"  # Flash Lite — RPM 여유 / 번역·분석 용도 충분
 )
 
 # ─────────────────────────────────────────
