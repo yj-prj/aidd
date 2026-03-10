@@ -2,7 +2,7 @@
 AI 개발도구 트렌드 → Slack 알림 봇 v2
 소스: Hacker News, Product Hunt, GitHub Trending, Reddit,
       GeekNews(긱뉴스), Velog 트렌딩, 요즘IT
-번역: Claude Haiku (Anthropic)
+번역/요약: Google Gemini API (무료 티어)
 실행: GitHub Actions — 매일 오전 9시 / 오후 6시 KST
 """
 
@@ -11,19 +11,23 @@ import json
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
-from anthropic import Anthropic
 
 # ─────────────────────────────────────────
 # 환경 설정
 # ─────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 PRODUCT_HUNT_TOKEN = os.environ.get("PRODUCT_HUNT_TOKEN", "")
 RUN_PERIOD = os.environ.get("RUN_PERIOD", "morning")  # "morning" | "evening"
 
 KST = timezone(timedelta(hours=9))
 HEADERS = {"User-Agent": "AI-Trend-SlackBot/2.0"}
-client = Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# Gemini API 엔드포인트 (무료 티어: 분당 15 요청, 하루 1,500 요청)
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models"
+    "/gemini-2.0-flash:generateContent"
+)
 
 # AI 개발도구 관련 키워드
 AI_DEV_KEYWORDS = [
@@ -329,19 +333,19 @@ def fetch_korean_communities() -> list[dict]:
 def translate_and_summarize(items: list[dict]) -> list[dict]:
     if not items:
         return items
-    print("\n🤖 Claude Haiku로 번역/요약 중...")
+    print("\n🤖 Gemini로 번역/요약 중...")
+
+    # 한국어 항목은 번역 스킵
+    for item in items:
+        if item.get("is_korean"):
+            item["title_ko"] = item["title"]
+            item["summary"] = ""
 
     to_translate = [
         {"id": i, "title": item["title"]}
         for i, item in enumerate(items)
         if not item.get("is_korean", False)
     ]
-
-    # 한국어 항목은 번역 패스
-    for i, item in enumerate(items):
-        if item.get("is_korean"):
-            item["title_ko"] = item["title"]
-            item["summary"] = ""
 
     if not to_translate:
         return items
@@ -350,23 +354,30 @@ def translate_and_summarize(items: list[dict]) -> list[dict]:
 
 규칙:
 - title_ko: 자연스러운 한국어 번역 (툴 이름·고유명사는 영문 유지)
-- summary: 15자 이내, 왜 주목받는지 핵심만
+- summary: 20자 이내, 왜 주목받는지 핵심만
 
-JSON 배열로만 응답 (코드블록 없이):
+JSON 배열로만 응답 (마크다운·코드블록 없이):
 [{{"id": 0, "title_ko": "번역 제목", "summary": "핵심 요약"}}]
 
 뉴스 목록:
 {json.dumps(to_translate, ensure_ascii=False)}"""
 
     try:
-        msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
+        resp = requests.post(
+            GEMINI_URL,
+            params={"key": GEMINI_API_KEY},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            headers={"Content-Type": "application/json"},
+            timeout=30,
         )
-        raw = msg.content[0].text.strip()
+        resp.raise_for_status()
+
+        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        # 코드블록 제거
         if raw.startswith("```"):
-            raw = "\n".join(raw.split("\n")[1:-1])
+            raw = "\n".join(raw.split("\n")[1:])
+        raw = raw.rstrip("```").strip()
+
         translations = {t["id"]: t for t in json.loads(raw)}
         for i, item in enumerate(items):
             if not item.get("is_korean") and i in translations:
@@ -375,6 +386,7 @@ JSON 배열로만 응답 (코드블록 없이):
             elif not item.get("is_korean"):
                 item.setdefault("title_ko", item["title"])
                 item.setdefault("summary", "")
+
     except Exception as e:
         print(f"  ⚠️ 번역 오류: {e}")
         for item in items:
@@ -459,7 +471,7 @@ def send_to_slack(items: list[dict], period: str):
     blocks.append({
         "type": "context",
         "elements": [{"type": "mrkdwn",
-                      "text": "📡 *소스*: HN · ProductHunt · GitHub · Reddit · GeekNews · Velog · 요즘IT  |  🤖 번역: Claude Haiku"}],
+                      "text": "📡 *소스*: HN · ProductHunt · GitHub · Reddit · GeekNews · Velog · 요즘IT  |  🤖 번역: Gemini 2.0 Flash (무료)"}],
     })
 
     resp = requests.post(SLACK_WEBHOOK_URL, json={"blocks": blocks}, timeout=10)
