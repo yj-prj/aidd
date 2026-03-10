@@ -364,7 +364,7 @@ def call_gemini(prompt: str) -> str:
         params={"key": GEMINI_API_KEY},
         json={"contents": [{"parts": [{"text": prompt}]}]},
         headers={"Content-Type": "application/json"},
-        timeout=30,
+        timeout=60,
     )
     if resp.status_code != 200:
         raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
@@ -372,203 +372,145 @@ def call_gemini(prompt: str) -> str:
 
 
 def clean_json(raw: str) -> str:
-    """코드블록 제거 후 JSON 문자열 반환"""
     if "```" in raw:
         raw = "\n".join(l for l in raw.split("\n") if not l.strip().startswith("```"))
     return raw.strip()
 
 
 # ══════════════════════════════════════════
-# Step 1. Gemini 필터링 — 쓸만한 소식인지 체크
+# Gemini 단일 호출 — 필터링 + 번역 + 분석 한 번에
 # ══════════════════════════════════════════
-def gemini_filter(items: list[dict]) -> list[dict]:
+def gemini_process(items: list[dict]) -> tuple:
     """
-    수집된 뉴스를 Gemini에게 넘겨 AI 개발도구 관점에서
-    '실제로 읽을 가치가 있는 소식'인지 판단.
-    keep=true인 것만 통과시킴.
+    Gemini를 단 1회 호출해서 아래 3가지를 한꺼번에 처리:
+      1. 필터링: AI 개발도구 관점에서 쓸만한 소식인지 판단
+      2. 번역+요약: 해외 소스 제목 한국어 번역 + 20자 요약
+      3. 분석: AI 개발도구 트렌드 인사이트 + 한 줄 요약
+
+    반환: (filtered_items, analysis_body, one_liner)
     """
-    if not GEMINI_API_KEY:
-        return items
-
-    print(f"\n🔍 Gemini 필터링 중... ({len(items)}개)")
-
-    news_list = [{"id": i, "title": item["title"], "source": item["source"]}
-                 for i, item in enumerate(items)]
-
-    prompt = f"""당신은 AI 개발도구 전문 큐레이터입니다.
-아래 뉴스 목록을 검토하고, 다음 기준으로 읽을 가치가 있는 소식인지 판단하세요.
-
-통과 기준 (하나라도 해당되면 keep=true):
-- AI IDE / 코드 에디터 관련 (Cursor, Copilot, Windsurf, Lovable 등)
-- Vibe coding / AI-Driven Development 트렌드
-- AI coding assistant / coding agent 관련
-- MCP (Model Context Protocol) 관련
-- 새로운 AI 개발도구 출시 또는 주요 업데이트
-- 개발자 워크플로우를 바꾸는 AI 툴·기능
-
-제외 기준 (모두 해당되면 keep=false):
-- 단순 모델 벤치마크·성능 비교
-- AI 규제·정책·윤리 이슈
-- AI 투자·인수합병 소식 (툴과 직접 관련 없는 것)
-- 학술 논문·연구 발표
-
-JSON 배열만 출력 (설명 없이):
-[{{"id": 0, "keep": true, "reason": "한 줄 이유"}}]
-
-뉴스 목록:
-{json.dumps(news_list, ensure_ascii=False)}"""
-
-    try:
-        raw = call_gemini(prompt)
-        print(f"  📝 필터 응답 미리보기: {raw[:100]}")
-        results = {{r["id"]: r for r in json.loads(clean_json(raw))}}
-
-        filtered = []
-        dropped  = []
-        for i, item in enumerate(items):
-            r = results.get(i, {})
-            if r.get("keep", True):  # 판단 못하면 기본 통과
-                item["filter_reason"] = r.get("reason", "")
-                filtered.append(item)
-            else:
-                dropped.append(item["title"][:50])
-
-        print(f"  ✅ 통과: {len(filtered)}개  제외: {len(dropped)}개")
-        if dropped:
-            print(f"  🗑️ 제외된 항목: {dropped}")
-        return filtered
-
-    except Exception as e:
-        print(f"  ⚠️ 필터링 오류: {e} → 전체 통과")
-        return items
-
-
-# ══════════════════════════════════════════
-# Step 2. Gemini 번역 + 요약
-# ══════════════════════════════════════════
-def translate_and_summarize(items: list[dict]) -> list[dict]:
-    for item in items:
-        if item.get("is_korean"):
-            item["title_ko"] = item["title"]
-            item["summary"]  = ""
-
-    to_translate = [
-        {"id": i, "title": item["title"]}
-        for i, item in enumerate(items)
-        if not item.get("is_korean", False)
-    ]
-
-    if not to_translate:
-        print("  ℹ️ 번역 대상 없음")
-        return items
-
-    print(f"\n🤖 Gemini 번역/요약 중... ({len(to_translate)}개)")
-
     if not GEMINI_API_KEY:
         print("  ❌ GEMINI_API_KEY 없음 → GitHub Secrets 확인 필요")
         for item in items:
             item.setdefault("title_ko", item["title"])
             item.setdefault("summary", "")
-        return items
+        return items, "", ""
 
-    prompt = f"""다음 AI 관련 뉴스 제목을 한국어로 번역하고 한 줄 요약을 작성하세요.
+    print(f"\n🤖 Gemini 처리 중 (필터링+번역+분석 1회 호출)... ({len(items)}개)")
 
-규칙:
+    news_list = [
+        {
+            "id": i,
+            "source": item["source"],
+            "title": item["title"],
+            "is_korean": item.get("is_korean", False),
+        }
+        for i, item in enumerate(items)
+    ]
+
+    prompt = f"""당신은 AI 개발도구 트렌드 분석가 겸 큐레이터입니다.
+아래 뉴스 목록을 보고 아래 3가지 작업을 한 번에 수행하세요.
+
+━━━ 작업 1: 필터링 ━━━
+각 뉴스가 AI 개발도구 관점에서 읽을 가치가 있는지 판단하세요.
+
+통과 기준 (하나라도 해당되면 keep=true):
+- AI IDE / 코드 에디터 (Cursor, Copilot, Windsurf, Lovable, Bolt 등)
+- Vibe coding / AI-Driven Development
+- AI coding assistant / coding agent
+- MCP (Model Context Protocol)
+- 새로운 AI 개발도구 출시 또는 주요 업데이트
+- 개발자 워크플로우를 바꾸는 AI 툴·기능
+
+제외 기준 (해당되면 keep=false):
+- 단순 모델 벤치마크·성능 비교
+- AI 규제·정책·윤리
+- AI 투자·인수합병 (툴과 무관한 것)
+- 학술 논문·연구
+
+━━━ 작업 2: 번역+요약 ━━━
+is_korean=false인 항목만 한국어로 번역하고 요약하세요.
 - title_ko: 자연스러운 한국어 (툴 이름·고유명사는 영문 유지)
-- summary: 20자 이내, 핵심만 (어떤 툴/내용인지, 왜 화제인지)
-- JSON 배열만 출력 (```없이, 설명 없이)
+- summary: 20자 이내, 어떤 툴인지 / 왜 화제인지
+- is_korean=true인 항목은 title_ko=title, summary="" 로 두세요.
 
-출력 형식:
-[{{"id": 0, "title_ko": "번역 제목", "summary": "핵심 요약"}}]
+━━━ 작업 3: 분석 ━━━
+keep=true인 뉴스 전체를 바탕으로 AI 개발도구 관점 인사이트를 작성하세요.
+(Vibe coding / AIDD 흐름, AI IDE 경쟁, coding agent 동향, MCP 생태계, 신규 툴)
 
-뉴스 목록:
-{json.dumps(to_translate, ensure_ascii=False)}"""
+━━━ 출력 형식 (반드시 이 순서대로) ━━━
+
+[FILTER_START]
+[{{"id": 0, "keep": true, "title_ko": "번역 제목", "summary": "요약"}}]
+[FILTER_END]
+
+[ANALYSIS_START]
+📌 오늘의 핵심 트렌드
+(2~3문장)
+
+🔥 주목할 움직임
+(화제가 된 툴·기능. 없으면 이 섹션 생략)
+
+💡 개발자가 챙겨볼 것
+(워크플로우에 영향을 줄 내용 1~2가지)
+
+🗞️ 오늘의 트렌딩 한 줄 요약
+(전체를 압축한 딱 한 문장)
+[ANALYSIS_END]
+
+━━━ 뉴스 목록 ━━━
+{json.dumps(news_list, ensure_ascii=False)}"""
 
     try:
         raw = call_gemini(prompt)
-        print(f"  📝 번역 응답 미리보기: {raw[:100]}")
-        translations = {{t["id"]: t for t in json.loads(clean_json(raw))}}
-        print(f"  ✅ 번역 완료: {len(translations)}개")
+        print(f"  📝 응답 길이: {len(raw)}자")
 
+        # ── 필터+번역 파싱
+        filter_json = ""
+        if "[FILTER_START]" in raw and "[FILTER_END]" in raw:
+            filter_json = raw.split("[FILTER_START]")[1].split("[FILTER_END]")[0].strip()
+        results = {r["id"]: r for r in json.loads(clean_json(filter_json))}
+
+        filtered, dropped = [], []
         for i, item in enumerate(items):
-            if not item.get("is_korean"):
-                t = translations.get(i, {})
-                item["title_ko"] = t.get("title_ko", item["title"])
-                item["summary"]  = t.get("summary", "")
+            r = results.get(i, {})
+            if r.get("keep", True):
+                item["title_ko"] = r.get("title_ko", item["title"])
+                item["summary"]  = r.get("summary", "")
+                filtered.append(item)
+            else:
+                dropped.append(item["title"][:50])
+
+        print(f"  ✅ 필터: 통과 {len(filtered)}개 / 제외 {len(dropped)}개")
+        if dropped:
+            print(f"  🗑️ 제외: {dropped}")
+
+        # ── 분석 파싱
+        analysis_body = ""
+        one_liner     = ""
+        if "[ANALYSIS_START]" in raw and "[ANALYSIS_END]" in raw:
+            analysis_raw = raw.split("[ANALYSIS_START]")[1].split("[ANALYSIS_END]")[0].strip()
+
+            if "🗞️" in analysis_raw:
+                after = analysis_raw.split("🗞️")[-1].strip()
+                for line in after.splitlines():
+                    line = line.strip()
+                    if line and "한 줄 요약" not in line:
+                        one_liner = line
+                        break
+                analysis_body = analysis_raw.split("🗞️")[0].strip()
+            else:
+                analysis_body = analysis_raw
+
+        print(f"  ✅ 분석 완료 ({len(analysis_body)}자) / 한 줄 요약: {one_liner[:40]}")
+        return filtered, analysis_body, one_liner
 
     except Exception as e:
-        print(f"  ⚠️ 번역 오류: {e}")
+        print(f"  ⚠️ Gemini 처리 오류: {e}")
         for item in items:
             item.setdefault("title_ko", item["title"])
             item.setdefault("summary", "")
-
-    return items
-
-
-# ══════════════════════════════════════════
-# Step 3. Gemini 분석 — AI 개발도구 관점
-# ══════════════════════════════════════════
-def gemini_analyze(items: list[dict]) -> tuple:
-    """
-    통과된 뉴스 전체를 바탕으로 AI 개발도구 관점 인사이트 생성.
-    반환: (분석 본문, 한 줄 트렌딩 요약)
-    """
-    if not GEMINI_API_KEY:
-        return "", ""
-
-    print("\n🧠 Gemini 분석 중...")
-
-    titles = "\n".join(f"- [{item['source']}] {item['title']}" for item in items)
-
-    prompt = f"""당신은 AI 개발도구 트렌드 분석가입니다.
-아래는 오늘 전 세계 커뮤니티에서 수집·필터링된 AI 개발도구 관련 뉴스입니다.
-
-다음 관점으로만 분석하세요 (다른 AI 이슈는 언급하지 말 것):
-- Vibe coding / AIDD (AI-Driven Development) 흐름
-- AI IDE / 코드 에디터 경쟁 구도
-- AI coding agent / autonomous coding 동향
-- MCP (Model Context Protocol) 생태계
-- 주목할 신규 AI 개발도구
-
-아래 형식으로 작성하세요:
-
-📌 오늘의 핵심 트렌드
-(2~3문장. 오늘 뉴스에서 가장 눈에 띄는 흐름)
-
-🔥 주목할 움직임
-(갑자기 화제가 된 툴·기능이 있다면 언급. 없으면 생략)
-
-💡 개발자가 챙겨볼 것
-(실제 개발 워크플로우에 영향을 줄 수 있는 내용 1~2가지)
-
-🗞️ 오늘의 트렌딩 한 줄 요약
-(위 전체를 압축한 딱 한 문장. "🗞️ 오늘의 트렌딩 한 줄 요약" 헤더 바로 아래에 작성)
-
-뉴스 목록:
-{titles}"""
-
-    try:
-        raw = call_gemini(prompt)
-        print(f"  ✅ 분석 완료 ({len(raw)}자)")
-
-        # 한 줄 요약 파싱
-        one_liner = ""
-        if "🗞️" in raw:
-            after = raw.split("🗞️")[-1].strip()
-            for line in after.splitlines():
-                line = line.strip()
-                if line and "한 줄 요약" not in line:
-                    one_liner = line
-                    break
-            body = raw.split("🗞️")[0].strip()
-        else:
-            body = raw
-
-        return body, one_liner
-
-    except Exception as e:
-        print(f"  ⚠️ 분석 오류: {e}")
-        return "", ""
+        return items, "", ""
 
 
 # ══════════════════════════════════════════
@@ -715,20 +657,14 @@ def main():
         print("❌ 수집 항목 없음. 종료.")
         return
 
-    # 2. Gemini 필터링 — 쓸만한 소식인지 체크
-    items = gemini_filter(items)
+    # 2. Gemini 단일 호출 — 필터링 + 번역 + 분석 한 번에
+    items, analysis, one_liner = gemini_process(items)
 
     if not items:
         print("❌ 필터링 후 항목 없음. 종료.")
         return
 
-    # 3. Gemini 번역 + 요약
-    items = translate_and_summarize(items)
-
-    # 4. Gemini 분석 — AI 개발도구 관점 인사이트 + 한 줄 요약
-    analysis, one_liner = gemini_analyze(items)
-
-    # 5. Slack 발송 (분석 먼저, 뉴스 링크, 한 줄 요약 마지막)
+    # 3. Slack 발송 (분석 먼저, 뉴스 링크, 한 줄 요약 마지막)
     send_to_slack(items, analysis, one_liner, period)
 
 
