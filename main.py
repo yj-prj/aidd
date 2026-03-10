@@ -36,7 +36,7 @@ KST        = timezone(timedelta(hours=9))
 HEADERS    = {"User-Agent": "AI-Trend-SlackBot/4.0"}
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models"
-    "/gemini-2.0-flash:generateContent"
+    "/gemini-1.5-flash-8b:generateContent"  # RPM 1,000 / 일 무제한 (무료 티어)
 )
 
 # ─────────────────────────────────────────
@@ -359,16 +359,24 @@ def fetch_korean_communities() -> list[dict]:
 # Gemini 호출 공통 함수
 # ══════════════════════════════════════════
 def call_gemini(prompt: str) -> str:
-    resp = requests.post(
-        GEMINI_URL,
-        params={"key": GEMINI_API_KEY},
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        headers={"Content-Type": "application/json"},
-        timeout=60,
-    )
-    if resp.status_code != 200:
-        raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
-    return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    import time
+    for attempt in range(3):
+        resp = requests.post(
+            GEMINI_URL,
+            params={"key": GEMINI_API_KEY},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            headers={"Content-Type": "application/json"},
+            timeout=60,
+        )
+        if resp.status_code == 429:
+            wait = 10 * (attempt + 1)  # 10초, 20초, 30초
+            print(f"  ⏳ 429 rate limit → {wait}초 후 재시도 ({attempt+1}/3)")
+            time.sleep(wait)
+            continue
+        if resp.status_code != 200:
+            raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    raise ValueError("Gemini 429: 재시도 3회 모두 실패")
 
 
 def clean_json(raw: str) -> str:
