@@ -1,7 +1,7 @@
 # 🤖 AI 개발도구 트렌드 Slack 봇 v2
 
 전 세계 + 국내 개발자 커뮤니티에서 AI 바이브코딩 툴 트렌드를 수집해  
-**매일 오전 9시 / 오후 6시 KST** 에 Slack으로 자동 발송합니다.
+**매일 오전 9시 / 오후 4시 KST** 에 Slack으로 자동 발송합니다.
 
 ---
 
@@ -47,11 +47,12 @@ git push -u origin main
 4. **Add New Webhook to Workspace** → 알림 받을 채널 선택
 5. Webhook URL 복사 (`https://hooks.slack.com/services/T.../B.../...`)
 
-### 3단계 — Anthropic API 키 발급
+### 3단계 — Google Gemini API 키 발급 (완전 무료)
 
-1. https://console.anthropic.com → **API Keys** → **Create Key**
-2. 키 복사 (`sk-ant-api03-...`)
-3. 💰 예상 비용: Claude Haiku 기준 **월 $1~3** (하루 2회 × 30일)
+1. https://aistudio.google.com 접속 (Google 계정으로 로그인)
+2. 상단 **Get API key** → **Create API key** 클릭
+3. 키 복사 (`AIza...`)
+4. 💰 비용: **완전 무료** (하루 1,500 요청 / 분당 15 요청 — 이 봇은 하루 2회만 사용)
 
 ### 4단계 — GitHub Secrets 등록
 
@@ -59,7 +60,7 @@ git push -u origin main
 
 | Secret 이름 | 값 | 필수 |
 |-------------|-----|------|
-| `ANTHROPIC_API_KEY` | Anthropic API 키 | ✅ 필수 |
+| `GEMINI_API_KEY` | Google AI Studio API 키 | ✅ 필수 |
 | `SLACK_WEBHOOK_URL` | Slack Webhook URL | ✅ 필수 |
 | `PRODUCT_HUNT_TOKEN` | Product Hunt API 토큰 | ⬜ 선택 (없으면 RSS 사용) |
 
@@ -150,6 +151,6 @@ subreddits = [
 | GeekNews RSS | 완전 무료 |
 | Velog RSS | 완전 무료 |
 | 요즘IT RSS | 완전 무료 |
-| **Claude Haiku API** | **월 $1~3** ← 유일한 비용 |
+| **Gemini 2.0 Flash API** | **완전 무료** (하루 1,500 요청 무료 티어) |
 
-**총 월 비용: $1~3** 🎉
+**총 월 비용: $0 완전 무료** 🎉
