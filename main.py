@@ -356,7 +356,95 @@ def fetch_korean_communities() -> list[dict]:
 
 
 # ══════════════════════════════════════════
-# Gemini 번역 + 요약
+# Gemini 호출 공통 함수
+# ══════════════════════════════════════════
+def call_gemini(prompt: str) -> str:
+    resp = requests.post(
+        GEMINI_URL,
+        params={"key": GEMINI_API_KEY},
+        json={"contents": [{"parts": [{"text": prompt}]}]},
+        headers={"Content-Type": "application/json"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+    return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
+def clean_json(raw: str) -> str:
+    """코드블록 제거 후 JSON 문자열 반환"""
+    if "```" in raw:
+        raw = "\n".join(l for l in raw.split("\n") if not l.strip().startswith("```"))
+    return raw.strip()
+
+
+# ══════════════════════════════════════════
+# Step 1. Gemini 필터링 — 쓸만한 소식인지 체크
+# ══════════════════════════════════════════
+def gemini_filter(items: list[dict]) -> list[dict]:
+    """
+    수집된 뉴스를 Gemini에게 넘겨 AI 개발도구 관점에서
+    '실제로 읽을 가치가 있는 소식'인지 판단.
+    keep=true인 것만 통과시킴.
+    """
+    if not GEMINI_API_KEY:
+        return items
+
+    print(f"\n🔍 Gemini 필터링 중... ({len(items)}개)")
+
+    news_list = [{"id": i, "title": item["title"], "source": item["source"]}
+                 for i, item in enumerate(items)]
+
+    prompt = f"""당신은 AI 개발도구 전문 큐레이터입니다.
+아래 뉴스 목록을 검토하고, 다음 기준으로 읽을 가치가 있는 소식인지 판단하세요.
+
+통과 기준 (하나라도 해당되면 keep=true):
+- AI IDE / 코드 에디터 관련 (Cursor, Copilot, Windsurf, Lovable 등)
+- Vibe coding / AI-Driven Development 트렌드
+- AI coding assistant / coding agent 관련
+- MCP (Model Context Protocol) 관련
+- 새로운 AI 개발도구 출시 또는 주요 업데이트
+- 개발자 워크플로우를 바꾸는 AI 툴·기능
+
+제외 기준 (모두 해당되면 keep=false):
+- 단순 모델 벤치마크·성능 비교
+- AI 규제·정책·윤리 이슈
+- AI 투자·인수합병 소식 (툴과 직접 관련 없는 것)
+- 학술 논문·연구 발표
+
+JSON 배열만 출력 (설명 없이):
+[{{"id": 0, "keep": true, "reason": "한 줄 이유"}}]
+
+뉴스 목록:
+{json.dumps(news_list, ensure_ascii=False)}"""
+
+    try:
+        raw = call_gemini(prompt)
+        print(f"  📝 필터 응답 미리보기: {raw[:100]}")
+        results = {{r["id"]: r for r in json.loads(clean_json(raw))}}
+
+        filtered = []
+        dropped  = []
+        for i, item in enumerate(items):
+            r = results.get(i, {})
+            if r.get("keep", True):  # 판단 못하면 기본 통과
+                item["filter_reason"] = r.get("reason", "")
+                filtered.append(item)
+            else:
+                dropped.append(item["title"][:50])
+
+        print(f"  ✅ 통과: {len(filtered)}개  제외: {len(dropped)}개")
+        if dropped:
+            print(f"  🗑️ 제외된 항목: {dropped}")
+        return filtered
+
+    except Exception as e:
+        print(f"  ⚠️ 필터링 오류: {e} → 전체 통과")
+        return items
+
+
+# ══════════════════════════════════════════
+# Step 2. Gemini 번역 + 요약
 # ══════════════════════════════════════════
 def translate_and_summarize(items: list[dict]) -> list[dict]:
     for item in items:
@@ -388,7 +476,7 @@ def translate_and_summarize(items: list[dict]) -> list[dict]:
 규칙:
 - title_ko: 자연스러운 한국어 (툴 이름·고유명사는 영문 유지)
 - summary: 20자 이내, 핵심만 (어떤 툴/내용인지, 왜 화제인지)
-- 반드시 JSON 배열만 출력 (```없이, 설명 없이)
+- JSON 배열만 출력 (```없이, 설명 없이)
 
 출력 형식:
 [{{"id": 0, "title_ko": "번역 제목", "summary": "핵심 요약"}}]
@@ -397,24 +485,9 @@ def translate_and_summarize(items: list[dict]) -> list[dict]:
 {json.dumps(to_translate, ensure_ascii=False)}"""
 
     try:
-        resp = requests.post(
-            GEMINI_URL,
-            params={"key": GEMINI_API_KEY},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            print(f"  ❌ Gemini {resp.status_code}: {resp.text[:200]}")
-            raise ValueError(f"HTTP {resp.status_code}")
-
-        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        print(f"  📝 응답 미리보기: {raw[:100]}")
-
-        if "```" in raw:
-            raw = "\n".join(l for l in raw.split("\n") if not l.strip().startswith("```")).strip()
-
-        translations = {t["id"]: t for t in json.loads(raw)}
+        raw = call_gemini(prompt)
+        print(f"  📝 번역 응답 미리보기: {raw[:100]}")
+        translations = {{t["id"]: t for t in json.loads(clean_json(raw))}}
         print(f"  ✅ 번역 완료: {len(translations)}개")
 
         for i, item in enumerate(items):
@@ -423,11 +496,6 @@ def translate_and_summarize(items: list[dict]) -> list[dict]:
                 item["title_ko"] = t.get("title_ko", item["title"])
                 item["summary"]  = t.get("summary", "")
 
-    except json.JSONDecodeError as e:
-        print(f"  ⚠️ JSON 파싱 실패: {e}")
-        for item in items:
-            item.setdefault("title_ko", item["title"])
-            item.setdefault("summary", "")
     except Exception as e:
         print(f"  ⚠️ 번역 오류: {e}")
         for item in items:
@@ -435,6 +503,54 @@ def translate_and_summarize(items: list[dict]) -> list[dict]:
             item.setdefault("summary", "")
 
     return items
+
+
+# ══════════════════════════════════════════
+# Step 3. Gemini 분석 — AI 개발도구 관점
+# ══════════════════════════════════════════
+def gemini_analyze(items: list[dict]) -> str:
+    """
+    통과된 뉴스 전체를 바탕으로
+    AI 개발도구 / vibe coding / IDE / agent / MCP 관점 인사이트 생성
+    """
+    if not GEMINI_API_KEY:
+        return ""
+
+    print("\n🧠 Gemini 분석 중...")
+
+    titles = "\n".join(f"- [{item['source']}] {item['title']}" for item in items)
+
+    prompt = f"""당신은 AI 개발도구 트렌드 분석가입니다.
+아래는 오늘 전 세계 커뮤니티에서 수집·필터링된 AI 개발도구 관련 뉴스입니다.
+
+다음 관점으로만 분석하세요 (다른 AI 이슈는 언급하지 말 것):
+- Vibe coding / AIDD (AI-Driven Development) 흐름
+- AI IDE / 코드 에디터 경쟁 구도
+- AI coding agent / autonomous coding 동향
+- MCP (Model Context Protocol) 생태계
+- 주목할 신규 AI 개발도구
+
+아래 형식으로 작성하세요:
+
+📌 오늘의 핵심 트렌드
+(2~3문장. 오늘 뉴스에서 가장 눈에 띄는 흐름)
+
+🔥 주목할 움직임
+(갑자기 화제가 된 툴·기능이 있다면 언급. 없으면 생략)
+
+💡 개발자가 챙겨볼 것
+(실제 개발 워크플로우에 영향을 줄 수 있는 내용 1~2가지)
+
+뉴스 목록:
+{titles}"""
+
+    try:
+        analysis = call_gemini(prompt)
+        print(f"  ✅ 분석 완료 ({len(analysis)}자)")
+        return analysis
+    except Exception as e:
+        print(f"  ⚠️ 분석 오류: {e}")
+        return ""
 
 
 # ══════════════════════════════════════════
@@ -458,7 +574,7 @@ def emoji_for(source: str) -> str:
     return "⚪"
 
 
-def send_to_slack(items: list[dict], period: str):
+def send_to_slack(items: list[dict], analysis: str, period: str):
     if not items:
         print("📭 전송할 항목 없음")
         return
@@ -468,9 +584,10 @@ def send_to_slack(items: list[dict], period: str):
     t1_cnt = sum(1 for x in items if x.get("tier") == 1)
     t2_cnt = sum(1 for x in items if x.get("tier") == 2)
 
+    # ── 헤더
     blocks: list[dict] = [
         {"type": "header",
-         "text": {"type": "plain_text", "text": f"🤖 AI 트렌드  {period_label}"}},
+         "text": {"type": "plain_text", "text": f"🤖 AI 개발도구 트렌드  {period_label}"}},
         {"type": "context",
          "elements": [{"type": "mrkdwn",
              "text": (
@@ -480,7 +597,15 @@ def send_to_slack(items: list[dict], period: str):
         {"type": "divider"},
     ]
 
-    # 소스 순서대로 그룹핑해서 출력
+    # ── Gemini 분석 섹션 (맨 앞)
+    if analysis:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*🧠 오늘의 AI 개발도구 트렌드 분석*\n\n{analysis}"},
+        })
+        blocks.append({"type": "divider"})
+
+    # ── 개별 뉴스 (소스 순서대로)
     source_order = [
         "Hacker News", "Product Hunt", "GitHub Trending",
         "GeekNews (긱뉴스)", "Velog 트렌딩", "요즘IT",
@@ -521,14 +646,14 @@ def send_to_slack(items: list[dict], period: str):
             })
             blocks.append({"type": "divider"})
 
+    # ── 푸터
     blocks.append({
         "type": "context",
         "elements": [{"type": "mrkdwn",
             "text": (
                 "📡 *해외*: HN · ProductHunt · GitHub  "
                 "*국내*: GeekNews · Velog · 요즘IT  "
-                "|  🤖 Gemini 2.0 Flash\n"
-                "🔧 개발도구/바이브코딩/AI assistant/AIDD  🌐 AI 전반 트렌드"
+                "|  🤖 필터링·분석·번역: Gemini 2.0 Flash"
             )}],
     })
 
@@ -546,25 +671,39 @@ def main():
     period = RUN_PERIOD
     now    = datetime.now(KST)
     print("=" * 55)
-    print(f"🚀 AI 트렌드 봇 v4  [{period.upper()}]  {now.strftime('%Y-%m-%d %H:%M KST')}")
+    print(f"🚀 AI 트렌드 봇 v5  [{period.upper()}]  {now.strftime('%Y-%m-%d %H:%M KST')}")
     print("=" * 55)
 
+    # 1. 수집
     items: list[dict] = []
-    items.extend(fetch_hacker_news())        # 해외 1  최대 3개
-    items.extend(fetch_product_hunt())       # 해외 2  최대 3개
-    items.extend(fetch_github_trending())    # 해외 3  최대 3개
-    items.extend(fetch_korean_communities()) # 국내    소스별 최대 2개
+    items.extend(fetch_hacker_news())
+    items.extend(fetch_product_hunt())
+    items.extend(fetch_github_trending())
+    items.extend(fetch_korean_communities())
 
     t1 = sum(1 for x in items if x.get("tier") == 1)
     t2 = sum(1 for x in items if x.get("tier") == 2)
-    print(f"\n📊 총 수집: {len(items)}개  (🔧 TIER1 개발도구: {t1}개  🌐 TIER2 AI전반: {t2}개)")
+    print(f"\n📊 수집: {len(items)}개  (🔧 TIER1: {t1}  🌐 TIER2: {t2})")
 
     if not items:
         print("❌ 수집 항목 없음. 종료.")
         return
 
+    # 2. Gemini 필터링 — 쓸만한 소식인지 체크
+    items = gemini_filter(items)
+
+    if not items:
+        print("❌ 필터링 후 항목 없음. 종료.")
+        return
+
+    # 3. Gemini 번역 + 요약
     items = translate_and_summarize(items)
-    send_to_slack(items, period)
+
+    # 4. Gemini 분석 — AI 개발도구 관점 인사이트
+    analysis = gemini_analyze(items)
+
+    # 5. Slack 발송 (분석 먼저, 뉴스 링크 뒤에)
+    send_to_slack(items, analysis, period)
 
 
 if __name__ == "__main__":
