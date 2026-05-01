@@ -32,8 +32,8 @@ jobs:
           python-version: "3.11"
 
       - name: 📦 패키지 설치
-        # anthropic 불필요 — requests만으로 Gemini 호출
-        run: pip install requests
+        # requests: HTTP, feedparser: RSS/Atom (비표준 엔티티·BOM 자동 복구)
+        run: pip install requests feedparser
 
       - name: 📚 seen.json 캐시 복원 (중복 제거 이력)
         id: seen-cache

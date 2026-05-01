@@ -23,7 +23,7 @@ import os
 import re
 import json
 import requests
-import xml.etree.ElementTree as ET
+import feedparser
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
@@ -260,51 +260,34 @@ def mark_seen(items: list[dict], seen: dict) -> dict:
 
 
 # ─────────────────────────────────────────
-# 공통 RSS / Atom 페처
+# 공통 RSS / Atom 페처 (feedparser 기반 — 비표준 엔티티/BOM/뒤죽박죽 XML 모두 처리)
 # ─────────────────────────────────────────
 def _fetch_rss(url: str, source: str, meta: str,
                is_korean: bool = False, limit: int = 30) -> list[dict]:
-    """RSS 2.0 / Atom 모두 처리. 실패 시 빈 리스트."""
     candidates: list[dict] = []
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
         if resp.status_code != 200:
             print(f"  ⚠️ {source} HTTP {resp.status_code}")
             return []
-        root = ET.fromstring(resp.content)
-        ns = {"a": "http://www.w3.org/2005/Atom"}
-
-        rss_items = root.findall(".//item")
-        atom_entries = root.findall("a:entry", ns)
-
-        if rss_items:
-            for it in rss_items[:limit]:
-                title = (it.findtext("title") or "").strip()
-                link = (it.findtext("link") or "").strip()
-                desc = (it.findtext("description") or "").strip()
-                if not title or not link:
-                    continue
-                t = tier(title + " " + desc)
-                candidates.append({
-                    "source": source, "title": title, "url": link,
-                    "score": 0, "comments_url": link, "meta": meta,
-                    "tier": t, "is_korean": is_korean,
-                })
-        elif atom_entries:
-            for entry in atom_entries[:limit]:
-                title = (entry.findtext("a:title", "", ns) or "").strip()
-                link_el = entry.find("a:link", ns)
-                link = link_el.get("href", "") if link_el is not None else ""
-                summary = (entry.findtext("a:summary", "", ns)
-                           or entry.findtext("a:content", "", ns) or "").strip()
-                if not title or not link:
-                    continue
-                t = tier(title + " " + summary)
-                candidates.append({
-                    "source": source, "title": title, "url": link,
-                    "score": 0, "comments_url": link, "meta": meta,
-                    "tier": t, "is_korean": is_korean,
-                })
+        feed = feedparser.parse(resp.content)
+        # bozo=1이어도 entries가 있으면 사용 (feedparser는 손상된 피드도 복구)
+        if not feed.entries:
+            err = getattr(feed, "bozo_exception", None)
+            print(f"  ⚠️ {source} parse error: {err or 'no entries'}")
+            return []
+        for entry in feed.entries[:limit]:
+            title = (entry.get("title", "") or "").strip()
+            link = (entry.get("link", "") or "").strip()
+            desc = (entry.get("summary", "") or entry.get("description", "") or "").strip()
+            if not title or not link:
+                continue
+            t = tier(title + " " + desc)
+            candidates.append({
+                "source": source, "title": title, "url": link,
+                "score": 0, "comments_url": link, "meta": meta,
+                "tier": t, "is_korean": is_korean,
+            })
     except Exception as e:
         print(f"  ⚠️ {source}: {e}")
     return candidates
@@ -386,26 +369,15 @@ def fetch_product_hunt() -> list[dict]:
         except Exception as e:
             print(f"  ℹ️ GraphQL 실패 → RSS: {e}")
 
-    # RSS fallback
+    # RSS fallback (feedparser)
     if not candidates:
-        try:
-            resp = requests.get("https://www.producthunt.com/feed", headers=HEADERS, timeout=10)
-            root = ET.fromstring(resp.content)
-            for item in root.findall(".//item"):
-                title = item.findtext("title", "")
-                link  = item.findtext("link", "")
-                desc  = item.findtext("description", "")
-                t = tier(title + " " + desc)
-                if t > 0:
-                    candidates.append({
-                        "source": "Product Hunt",
-                        "title": title, "url": link,
-                        "score": 0, "comments_url": link,
-                        "meta": "🆕 오늘의 신규 툴 출시",
-                        "tier": t,
-                    })
-        except Exception as e:
-            print(f"  ⚠️ RSS 오류: {e}")
+        rss_cands = _fetch_rss(
+            "https://www.producthunt.com/feed",
+            "Product Hunt", "🆕 오늘의 신규 툴 출시",
+            is_korean=False, limit=30,
+        )
+        # 기존 동작 유지: tier > 0인 항목만 채택
+        candidates.extend([c for c in rss_cands if c["tier"] > 0])
 
     out = pick_quota(candidates, quota=3)
     print(f"  → {len(out)}개 (TIER1: {sum(1 for x in out if x['tier']==1)}, TIER2: {sum(1 for x in out if x['tier']==2)})")
@@ -475,77 +447,30 @@ def fetch_github_trending() -> list[dict]:
 # ══════════════════════════════════════════
 # 국내 ─ GeekNews / Velog / 요즘IT
 # ══════════════════════════════════════════
-def _parse_korean_source(name: str, items_raw: list[tuple]) -> list[dict]:
-    """
-    items_raw: [(title, url, extra_text), ...]
-    소스별로 tier 분류 후 쿼터 선택
-    """
-    candidates = []
-    meta_map = {
-        "GeekNews (긱뉴스)": "🇰🇷 한국판 Hacker News",
-        "Velog 트렌딩":      "✍️ Velog 트렌딩 포스트",
-        "요즘IT":            "📰 국내 IT 미디어",
-    }
-    for title, url, extra in items_raw:
-        t = tier(title + " " + extra)
-        candidates.append({
-            "source": name,
-            "title": title, "url": url,
-            "score": 0, "comments_url": url,
-            "meta": meta_map.get(name, ""),
-            "tier": t,
-            "is_korean": True,
-        })
-    return pick_quota(candidates, quota=2)
-
-
 def fetch_korean_communities() -> list[dict]:
     print("🇰🇷 한국 커뮤니티...")
     out = []
 
-    # GeekNews
-    try:
-        resp = requests.get("https://news.hada.io/new.atom", headers=HEADERS, timeout=10)
-        root = ET.fromstring(resp.content)
-        ns   = {"a": "http://www.w3.org/2005/Atom"}
-        raw  = []
-        for entry in root.findall("a:entry", ns)[:50]:
-            title   = entry.findtext("a:title", "", ns)
-            summary = entry.findtext("a:summary", "", ns)
-            link_el = entry.find("a:link", ns)
-            link    = link_el.get("href", "") if link_el is not None else ""
-            raw.append((title, link, summary))
-        out.extend(_parse_korean_source("GeekNews (긱뉴스)", raw))
-    except Exception as e:
-        print(f"  ⚠️ GeekNews: {e}")
+    # GeekNews (Atom)
+    out.extend(pick_quota(_fetch_rss(
+        "https://news.hada.io/new.atom",
+        "GeekNews (긱뉴스)", "🇰🇷 한국판 Hacker News",
+        is_korean=True, limit=50,
+    ), quota=2))
 
-    # Velog
-    try:
-        resp = requests.get("https://v2.velog.io/rss/@trending", headers=HEADERS, timeout=10)
-        root = ET.fromstring(resp.content)
-        raw  = []
-        for item in root.findall(".//item")[:40]:
-            title = item.findtext("title", "")
-            link  = item.findtext("link", "")
-            desc  = item.findtext("description", "")
-            raw.append((title, link, desc))
-        out.extend(_parse_korean_source("Velog 트렌딩", raw))
-    except Exception as e:
-        print(f"  ⚠️ Velog: {e}")
+    # Velog 트렌딩
+    out.extend(pick_quota(_fetch_rss(
+        "https://v2.velog.io/rss/@trending",
+        "Velog 트렌딩", "✍️ Velog 트렌딩 포스트",
+        is_korean=True, limit=40,
+    ), quota=2))
 
     # 요즘IT
-    try:
-        resp = requests.get("https://yozm.wishket.com/magazine/feed/", headers=HEADERS, timeout=10)
-        root = ET.fromstring(resp.content)
-        raw  = []
-        for item in root.findall(".//item")[:30]:
-            title = item.findtext("title", "")
-            link  = item.findtext("link", "")
-            desc  = item.findtext("description", "")
-            raw.append((title, link, desc))
-        out.extend(_parse_korean_source("요즘IT", raw))
-    except Exception as e:
-        print(f"  ⚠️ 요즘IT: {e}")
+    out.extend(pick_quota(_fetch_rss(
+        "https://yozm.wishket.com/magazine/feed/",
+        "요즘IT", "📰 국내 IT 미디어",
+        is_korean=True, limit=30,
+    ), quota=2))
 
     t1 = sum(1 for x in out if x["tier"] == 1)
     t2 = sum(1 for x in out if x["tier"] == 2)
@@ -630,24 +555,56 @@ def fetch_kakao_tech() -> list[dict]:
 # Gemini 호출 공통 함수
 # ══════════════════════════════════════════
 def call_gemini(prompt: str) -> str:
+    """
+    재시도 정책:
+      - 429: Retry-After 헤더 우선, 없으면 30s, 60s, 120s 지수 백오프 (총 ~3.5분)
+      - 5xx: 짧은 백오프 5s, 15s 후 재시도
+      - 그 외 4xx: 즉시 실패 (재시도 무의미)
+    """
     import time
+    last_status = ""
     for attempt in range(3):
-        resp = requests.post(
-            GEMINI_URL,
-            params={"key": GEMINI_API_KEY},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            headers={"Content-Type": "application/json"},
-            timeout=60,
-        )
-        if resp.status_code == 429:
-            wait = 10 * (attempt + 1)  # 10초, 20초, 30초
-            print(f"  ⏳ 429 rate limit → {wait}초 후 재시도 ({attempt+1}/3)")
+        try:
+            resp = requests.post(
+                GEMINI_URL,
+                params={"key": GEMINI_API_KEY},
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                headers={"Content-Type": "application/json"},
+                timeout=60,
+            )
+        except requests.RequestException as e:
+            last_status = f"network: {e}"
+            wait = 10 * (attempt + 1)
+            print(f"  ⏳ 네트워크 오류 → {wait}초 후 재시도 ({attempt+1}/3): {e}")
             time.sleep(wait)
             continue
-        if resp.status_code != 200:
-            raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-    raise ValueError("Gemini 429: 재시도 3회 모두 실패")
+
+        if resp.status_code == 200:
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+        if resp.status_code == 429:
+            retry_after_hdr = resp.headers.get("Retry-After", "").strip()
+            try:
+                retry_after = int(retry_after_hdr) if retry_after_hdr else 0
+            except ValueError:
+                retry_after = 0
+            wait = max(retry_after, 30 * (2 ** attempt))  # 30s, 60s, 120s
+            last_status = f"429 (Retry-After={retry_after_hdr or 'none'})"
+            print(f"  ⏳ {last_status} → {wait}초 후 재시도 ({attempt+1}/3)")
+            time.sleep(wait)
+            continue
+
+        if 500 <= resp.status_code < 600:
+            wait = 5 * (attempt + 1) ** 2  # 5s, 20s, 45s
+            last_status = f"HTTP {resp.status_code}"
+            print(f"  ⏳ 서버 오류 {resp.status_code} → {wait}초 후 재시도 ({attempt+1}/3)")
+            time.sleep(wait)
+            continue
+
+        # 그 외 (400/401/403 등) — 재시도 무의미
+        raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+    raise ValueError(f"Gemini 재시도 3회 실패 ({last_status})")
 
 
 def clean_json(raw: str) -> str:
