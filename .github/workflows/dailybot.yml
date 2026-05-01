@@ -35,6 +35,14 @@ jobs:
         # anthropic 불필요 — requests만으로 Gemini 호출
         run: pip install requests
 
+      - name: 📚 seen.json 캐시 복원 (중복 제거 이력)
+        uses: actions/cache/restore@v4
+        with:
+          path: seen.json
+          key: ai-trend-seen-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ai-trend-seen-
+
       - name: 🤖 봇 실행
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -47,3 +55,10 @@ jobs:
               || (github.event.schedule == '0 0 * * *' && 'morning' || 'evening')
             }}
         run: python main.py
+
+      - name: 💾 seen.json 캐시 저장
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: seen.json
+          key: ai-trend-seen-${{ github.run_id }}-${{ github.run_attempt }}

@@ -1,0 +1,9 @@
+# 발송 이력 (Actions cache로 관리, 커밋 안 함)
+seen.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env

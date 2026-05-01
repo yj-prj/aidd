@@ -1,5 +1,5 @@
 """
-AI 개발도구 트렌드 → Slack 알림 봇 v4
+AI 개발도구 트렌드 → Slack 알림 봇 v4.1
 소스 (해외 3): Hacker News, Product Hunt, GitHub Trending
 소스 (국내 3): GeekNews(긱뉴스), Velog 트렌딩, 요즘IT
 번역/요약: Google Gemini 2.0 Flash (완전 무료)
@@ -15,14 +15,21 @@ AI 개발도구 트렌드 → Slack 알림 봇 v4
   - 각 소스에서 TIER_1 우선, 부족하면 TIER_2로 채움
   - 그래도 없으면 해당 소스 상위 인기글 1개 fallback
   - 최종 Slack 메시지: 소스별 1~3개, 총 6~12개
+
+[중복 제거]
+  - 같은 실행 내 cross-source 중복 제거 (URL 정규화 + 제목 정규화)
+  - 과거 N일(SEEN_TTL_DAYS, 기본 14일) 발송 이력은 seen.json에 보관
+  - utm_*, fbclid 등 트래킹 파라미터, www., trailing slash 제거 후 비교
 """
 
 import os
+import re
 import json
 import requests
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 # ─────────────────────────────────────────
 # 환경 설정
@@ -31,6 +38,8 @@ GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 SLACK_WEBHOOK_URL  = os.environ.get("SLACK_WEBHOOK_URL", "")
 PRODUCT_HUNT_TOKEN = os.environ.get("PRODUCT_HUNT_TOKEN", "")
 RUN_PERIOD         = os.environ.get("RUN_PERIOD", "morning")
+SEEN_FILE          = os.environ.get("SEEN_FILE", "seen.json")
+SEEN_TTL_DAYS      = int(os.environ.get("SEEN_TTL_DAYS", "14"))
 
 KST        = timezone(timedelta(hours=9))
 HEADERS    = {"User-Agent": "AI-Trend-SlackBot/4.0"}
@@ -110,6 +119,111 @@ def pick_quota(candidates: list[dict], quota: int = 3) -> list[dict]:
         result += t0[:1]  # 아무것도 없으면 인기글 1개라도
 
     return result[:quota]
+
+
+# ─────────────────────────────────────────
+# URL / 제목 정규화 + 중복 제거
+# ─────────────────────────────────────────
+_TRACKING_KEYS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
+    "fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi",
+    "ref", "ref_src", "ref_url", "referrer", "source",
+    "igshid", "share", "feature", "si",
+}
+
+
+def normalize_url(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        p = urlparse(url.strip())
+        if not p.netloc:
+            return url.strip()
+        netloc = p.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        qs = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=False)
+              if k.lower() not in _TRACKING_KEYS]
+        path = p.path.rstrip("/") or "/"
+        return urlunparse(p._replace(
+            scheme=(p.scheme or "https").lower(),
+            netloc=netloc, path=path,
+            query=urlencode(qs), fragment="",
+        ))
+    except Exception:
+        return url.strip()
+
+
+def normalize_title(title: str) -> str:
+    if not title:
+        return ""
+    t = title.lower()
+    t = re.sub(r"[^\wㄱ-ㆎ가-힣\s]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def load_seen() -> dict:
+    """과거 발송 이력 로드. TTL 지난 항목은 자동 제거."""
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    cutoff = (datetime.now(KST) - timedelta(days=SEEN_TTL_DAYS)).isoformat()
+    return {k: v for k, v in data.items() if isinstance(v, str) and v >= cutoff}
+
+
+def save_seen(seen: dict) -> None:
+    try:
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(seen, f, ensure_ascii=False, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"  ⚠️ seen.json 저장 실패: {e}")
+
+
+def dedup_items(items: list[dict], seen: dict) -> tuple[list[dict], int, int]:
+    """
+    1) 같은 실행 내 cross-source 중복 제거 (URL/제목 키)
+    2) 과거 발송 이력에 있는 항목 제거
+    각 item에 _url_key, _title_key 부여 → mark_seen에서 사용.
+    """
+    cross_dup = 0
+    hist_dup = 0
+    seen_url_now: set[str] = set()
+    seen_title_now: set[str] = set()
+    out: list[dict] = []
+    for item in items:
+        n_url = normalize_url(item.get("url", ""))
+        n_title = normalize_title(item.get("title", ""))
+        url_key = n_url
+        title_key = ("title:" + n_title) if n_title else ""
+
+        if (url_key and url_key in seen_url_now) or (title_key and title_key in seen_title_now):
+            cross_dup += 1
+            continue
+        if (url_key and url_key in seen) or (title_key and title_key in seen):
+            hist_dup += 1
+            continue
+
+        if url_key:
+            seen_url_now.add(url_key)
+        if title_key:
+            seen_title_now.add(title_key)
+        item["_url_key"] = url_key
+        item["_title_key"] = title_key
+        out.append(item)
+    return out, cross_dup, hist_dup
+
+
+def mark_seen(items: list[dict], seen: dict) -> dict:
+    now_iso = datetime.now(KST).isoformat()
+    for item in items:
+        if item.get("_url_key"):
+            seen[item["_url_key"]] = now_iso
+        if item.get("_title_key"):
+            seen[item["_title_key"]] = now_iso
+    return seen
 
 
 # ══════════════════════════════════════════
@@ -647,8 +761,12 @@ def main():
     period = RUN_PERIOD
     now    = datetime.now(KST)
     print("=" * 55)
-    print(f"🚀 AI 트렌드 봇 v5  [{period.upper()}]  {now.strftime('%Y-%m-%d %H:%M KST')}")
+    print(f"🚀 AI 트렌드 봇 v4.1  [{period.upper()}]  {now.strftime('%Y-%m-%d %H:%M KST')}")
     print("=" * 55)
+
+    # 0. 과거 발송 이력 로드
+    seen = load_seen()
+    print(f"📚 seen 이력: {len(seen)}개 (TTL {SEEN_TTL_DAYS}일)")
 
     # 1. 수집
     items: list[dict] = []
@@ -665,15 +783,30 @@ def main():
         print("❌ 수집 항목 없음. 종료.")
         return
 
-    # 2. Gemini 단일 호출 — 필터링 + 번역 + 분석 한 번에
+    # 2. 중복 제거 (소스 간 + 과거 발송 이력)
+    before = len(items)
+    items, cross_dup, hist_dup = dedup_items(items, seen)
+    print(f"🧹 중복 제거: {before} → {len(items)}  "
+          f"(소스 간 {cross_dup}, 과거 이력 {hist_dup})")
+
+    if not items:
+        print("❌ 중복 제거 후 항목 없음. 종료.")
+        return
+
+    # 3. Gemini 단일 호출 — 필터링 + 번역 + 분석 한 번에
     items, analysis, one_liner = gemini_process(items)
 
     if not items:
         print("❌ 필터링 후 항목 없음. 종료.")
         return
 
-    # 3. Slack 발송 (분석 먼저, 뉴스 링크, 한 줄 요약 마지막)
+    # 4. Slack 발송 (분석 먼저, 뉴스 링크, 한 줄 요약 마지막)
     send_to_slack(items, analysis, one_liner, period)
+
+    # 5. 발송된 항목을 seen.json에 기록
+    seen = mark_seen(items, seen)
+    save_seen(seen)
+    print(f"💾 seen.json 저장: {len(seen)}개 항목 보관")
 
 
 if __name__ == "__main__":
